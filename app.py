@@ -8,6 +8,7 @@ REFRESH_SECONDS = 10
 
 # 실제 Git 저장소를 여기에 추가하세요.
 GIT_REPOS = [
+    {"name": "Obsidian", "path": "/Users/chaerui/project/Obsidian"},
     {"name": "dashboard", "path": "/Users/chaerui/project/side_project/macmini_dashboard"},
 ]
 GIT_ACTIVITY_LOG = os.path.expanduser("~/macmini-dashboard-git.log")
