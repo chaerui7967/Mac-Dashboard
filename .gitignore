@@ -3,7 +3,7 @@
 
 ### private
 *tmp*
-
+*.claude*
 
 ### Flask ###
 instance/*
