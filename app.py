@@ -1,17 +1,27 @@
 from flask import Flask, render_template_string
-import psutil, subprocess, time, os
-from datetime import datetime
+import psutil, subprocess, time, os, glob, json
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
 PORT = 8080
 REFRESH_SECONDS = 10
 
-# 실제 Git 저장소를 여기에 추가하세요.
-GIT_REPOS = [
-    {"name": "Obsidian", "path": "/Users/chaerui/project/Obsidian"},
-    {"name": "dashboard", "path": "/Users/chaerui/project/side_project/macmini_dashboard"},
-]
-GIT_ACTIVITY_LOG = os.path.expanduser("~/macmini-dashboard-git.log")
+def _parse_git_repos(raw):
+    repos = []
+    for item in (raw or "").split(","):
+        item = item.strip()
+        if not item or ":" not in item:
+            continue
+        name, path = item.split(":", 1)
+        repos.append({"name": name.strip(), "path": os.path.expanduser(path.strip())})
+    return repos
+
+# Git 저장소/로그 경로는 .env 파일에서 읽습니다. (.env.example 참고)
+GIT_REPOS = _parse_git_repos(os.environ.get("GIT_REPOS", ""))
+GIT_ACTIVITY_LOG = os.path.expanduser(os.environ.get("GIT_ACTIVITY_LOG", "~/macmini-dashboard-git.log"))
 
 _prev_net = psutil.net_io_counters()
 _prev_disk = psutil.disk_io_counters()
@@ -36,7 +46,7 @@ body{padding:22px 24px}*{box-sizing:border-box}
 .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:16px}.card{padding:15px}.label{font-size:12px;color:#8e98a7;letter-spacing:1px;margin-bottom:7px}.big{font-size:28px;font-weight:700}
 .bar{height:7px;background:#292f38;border-radius:5px;margin-top:10px;overflow:hidden}.fill{height:100%;background:#4da3ff}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:8px}.mini{background:#0d1015;border-radius:9px;padding:9px}.mini-label{font-size:10px;color:#778191}.mini-value{font-size:17px;margin-top:4px}
-.mid{display:grid;grid-template-columns:1fr 1.6fr;gap:16px;margin-bottom:16px}.bottom{display:grid;grid-template-columns:1fr 1fr 1.5fr;gap:16px;margin-bottom:16px}
+.mid{display:grid;grid-template-columns:1.1fr 1.3fr 1fr;gap:16px;margin-bottom:16px}.bottom{display:grid;grid-template-columns:1fr 1fr 1.5fr;gap:16px;margin-bottom:16px}
 .row{height:32px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #222730;font-size:13px}.row:last-child{border:0}.name{max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.value{color:#b9c2ce}.ok{color:#61d98b}.warn{color:#f0c865}
 .gitrow{display:grid;grid-template-columns:1.1fr .7fr 1.2fr;gap:8px;min-height:32px;align-items:center;border-bottom:1px solid #222730;font-size:13px}
 .activity-row{display:grid;grid-template-columns:70px 55px 105px 1fr 65px 65px;gap:8px;min-height:31px;align-items:center;border-bottom:1px solid #222730;font-size:12px}
@@ -60,6 +70,7 @@ body{padding:22px 24px}*{box-sizing:border-box}
 <div class="mid">
 <div class="card"><div class="label">TOP PROCESSES · CPU</div>{% for p in processes %}<div class="row"><span class="name">{{ p.name }}</span><span class="value">{{ p.cpu }}% · {{ p.mem }}%</span></div>{% endfor %}</div>
 <div class="card"><div class="label">DOCKER CONTAINERS</div>{% if docker is none %}<div class="row"><span class="warn">Docker unavailable</span></div>{% elif docker %}{% for d in docker %}<div class="row"><span class="name"><span class="{{ 'ok' if d.running else 'warn' }}">●</span> {{ d.name }}</span><span class="{{ 'ok' if d.running else 'warn' }}">{{ d.status }}</span></div>{% endfor %}{% else %}<div class="row"><span class="warn">No containers</span></div>{% endif %}</div>
+<div class="card"><div class="label">CLAUDE USAGE</div><div class="two"><div class="mini"><div class="mini-label">TODAY</div><div class="mini-value">{{ claude_today_msgs }} msgs</div><div class="mini-label" style="margin-top:6px">{{ claude_today_tokens }} tok</div></div><div class="mini"><div class="mini-label">THIS WEEK</div><div class="mini-value">{{ claude_week_msgs }} msgs</div><div class="mini-label" style="margin-top:6px">{{ claude_week_tokens }} tok</div></div></div></div>
 </div>
 
 <div class="bottom">
@@ -82,6 +93,11 @@ def fmt(n):
         if n<1024 or u=="TB": return f"{n:.1f} {u}" if u!="B" else f"{n:.0f} B"
         n/=1024
 def rate(n): return fmt(n)+"/s"
+def fmt_num(n):
+    n=float(n)
+    for u in ["","K","M","B"]:
+        if abs(n)<1000 or u=="B": return f"{n:.0f}{u}" if u=="" else f"{n:.1f}{u}"
+        n/=1000
 def duration(s):
     s=int(s); d,s=divmod(s,86400); h,s=divmod(s,3600); m,_=divmod(s,60)
     return f"{d}D {h:02d}H {m:02d}M"
@@ -117,11 +133,36 @@ def git_status():
         if ahead and behind and (ahead!="0" or behind!="0"): state=f"{ahead} ahead / {behind} behind"
         out.append({"name":repo["name"],"branch":branch,"clean":state=="CLEAN","state":state})
     return out
+def claude_usage():
+    # Claude Code가 로컬에 남기는 세션 로그(~/.claude/projects/**/*.jsonl)를 집계.
+    # 구독제(Pro/Max) 사용량은 비용($)이 아니라 메시지/토큰 수로만 표시.
+    stats={"today_msgs":0,"today_tokens":0,"week_msgs":0,"week_tokens":0}
+    pattern=os.path.join(os.path.expanduser("~"),".claude","projects","**","*.jsonl")
+    today=datetime.now().date(); week_start=today-timedelta(days=today.weekday())
+    for fp in glob.glob(pattern,recursive=True):
+        try:
+            with open(fp,encoding="utf-8") as f:
+                for line in f:
+                    line=line.strip()
+                    if not line: continue
+                    try: rec=json.loads(line)
+                    except: continue
+                    if rec.get("type")!="assistant": continue
+                    usage=(rec.get("message") or {}).get("usage")
+                    ts=rec.get("timestamp")
+                    if not usage or not ts: continue
+                    try: d=datetime.fromisoformat(ts.replace("Z","+00:00")).astimezone().date()
+                    except: continue
+                    tok=sum(usage.get(k) or 0 for k in ("input_tokens","output_tokens","cache_creation_input_tokens","cache_read_input_tokens"))
+                    if d==today: stats["today_msgs"]+=1; stats["today_tokens"]+=tok
+                    if d>=week_start: stats["week_msgs"]+=1; stats["week_tokens"]+=tok
+        except: continue
+    return stats
 def activities():
     if not os.path.exists(GIT_ACTIVITY_LOG): return []
     out=[]
     try:
-        lines=open(GIT_ACTIVITY_LOG,encoding="utf-8").readlines()[-5:]
+        lines=open(GIT_ACTIVITY_LOG,encoding="utf-8").readlines()[-4:]
         for line in reversed(lines):
             p=line.rstrip().split("|",5)
             if len(p)==6:
@@ -145,8 +186,8 @@ def home():
         try:
             i=p.info; ps.append({"name":i["name"] or "unknown","cpu":round(i["cpu_percent"] or 0,1),"mem":round(i["memory_percent"] or 0,1)})
         except: pass
-    ps.sort(key=lambda x:x["cpu"],reverse=True); loads=os.getloadavg()
-    return render_template_string(HTML,refresh=REFRESH_SECONDS,cpu=round(cpu,1),mem=round(mem.percent,1),mem_used=fmt(mem.used),mem_total=fmt(mem.total),swap=f"{fmt(swap.used)} / {fmt(swap.total)}",disk=round(disk.percent,1),disk_used=fmt(disk.used),disk_free=fmt(disk.free),down=rate(down),up=rate(up),day_down=fmt(max(net.bytes_recv-_day_recv,0)),day_up=fmt(max(net.bytes_sent-_day_sent,0)),read=rate(read),write=rate(write),processes=ps[:7],docker=docker(),git_status=git_status(),activities=activities(),uptime=duration(time.time()-psutil.boot_time()),load1=f"{loads[0]:.2f}",load5=f"{loads[1]:.2f}",load15=f"{loads[2]:.2f}",process_count=len(psutil.pids()),now=datetime.now().strftime("%H:%M:%S"),date=datetime.now().strftime("%Y-%m-%d (%a)"))
+    ps.sort(key=lambda x:x["cpu"],reverse=True); loads=os.getloadavg(); cu=claude_usage()
+    return render_template_string(HTML,refresh=REFRESH_SECONDS,cpu=round(cpu,1),mem=round(mem.percent,1),mem_used=fmt(mem.used),mem_total=fmt(mem.total),swap=f"{fmt(swap.used)} / {fmt(swap.total)}",disk=round(disk.percent,1),disk_used=fmt(disk.used),disk_free=fmt(disk.free),down=rate(down),up=rate(up),day_down=fmt(max(net.bytes_recv-_day_recv,0)),day_up=fmt(max(net.bytes_sent-_day_sent,0)),read=rate(read),write=rate(write),processes=ps[:5],docker=docker(),git_status=git_status(),activities=activities(),uptime=duration(time.time()-psutil.boot_time()),load1=f"{loads[0]:.2f}",load5=f"{loads[1]:.2f}",load15=f"{loads[2]:.2f}",process_count=len(psutil.pids()),now=datetime.now().strftime("%H:%M:%S"),date=datetime.now().strftime("%Y-%m-%d (%a)"),claude_today_msgs=cu["today_msgs"],claude_today_tokens=fmt_num(cu["today_tokens"]),claude_week_msgs=cu["week_msgs"],claude_week_tokens=fmt_num(cu["week_tokens"]))
 
 if __name__=="__main__":
     print(f"Mac mini Dashboard: http://localhost:{PORT}")
