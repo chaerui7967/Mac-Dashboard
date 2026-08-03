@@ -26,14 +26,11 @@ http://MAC_MINI_IP:8080
 
 ### git 저장소 추가
 - Git 저장소:
-app.py 상단 GIT_REPOS에 경로를 추가하세요.
+`.env.example`을 `.env`로 복사한 뒤 `GIT_REPOS`에 경로를 추가하세요. `.env`는 gitignore되어 커밋되지 않습니다.
 
 ```
-예:
-GIT_REPOS = [
- {"name":"dashboard","path":"/Users/username/projects/dashboard"},
- {"name":"crawler","path":"/Users/username/projects/crawler"},
-]
+예 (.env):
+GIT_REPOS=dashboard:/Users/username/projects/dashboard,crawler:/Users/username/projects/crawler
 ```
 
 ```
